@@ -1,0 +1,3 @@
+# Mesmas quebras de linha no Windows e no Ubuntu (evita scripts .sh/.sql quebrados)
+* text=auto eol=lf
+*.png binary

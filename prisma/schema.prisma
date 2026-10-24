@@ -1,0 +1,233 @@
+// =============================================================================
+// greencode - modelo relacional (Atividade 2)
+//
+// Convenções:
+//  - Modelos e campos em camelCase no TypeScript; tabelas/colunas em snake_case
+//    no banco (@@map/@map), o que deixa o SQL manual das migrações legível.
+//  - Todo modelo mutável possui `versao` para controle de concorrência otimista.
+//  - Valores monetários e pesos usam Decimal (nunca Float) para evitar erro de
+//    arredondamento binário.
+//  - Constraints CHECK, triggers e a sequence do código de barras não são
+//    expressáveis no schema do Prisma: estão escritas à mão na migração
+//    `prisma/migrations/*_init/migration.sql`.
+// =============================================================================
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// -----------------------------------------------------------------------------
+// Enumerações (idênticas às do diagrama UML da Atividade 1)
+// -----------------------------------------------------------------------------
+
+enum PapelUsuario {
+  ADMINISTRADOR
+  OPERADOR_CADASTRO
+  GESTOR_ALMOXARIFADO
+  AUDITOR
+}
+
+enum StatusLote {
+  RECEBIDO
+  EM_TRIAGEM
+  TRIAGEM_CONCLUIDA
+  ENCAMINHADO
+  FINALIZADO
+}
+
+enum TipoEquipamento {
+  COMPUTADOR_MESA
+  NOTEBOOK
+  MONITOR
+  IMPRESSORA
+  SERVIDOR
+  ROTEADOR
+  CABO_ESTRUTURADO
+  FONTE_ALIMENTACAO
+}
+
+// A ordem importa: do melhor para o pior estado. A regra de "queda de duas ou
+// mais categorias exige justificativa" usa essa ordem.
+enum EstadoFisico {
+  NOVO
+  BOM_ESTADO
+  USADO_LEVE
+  USADO_MODERADO
+  DANIFICADO_LEVE
+  DANIFICADO_GRAVE
+  INSERVIVEL
+}
+
+enum StatusRastreamento {
+  AGUARDANDO_TRIAGEM
+  EM_TRIAGEM
+  AGUARDANDO_DESMONTE
+  EM_DESMONTE
+  PECAS_REAPROVEITADAS
+  MATERIAL_RECICLAVEL
+  DESCARTE_SEGURO
+  BAIXA_DEFINITIVA
+}
+
+// -----------------------------------------------------------------------------
+// Autenticação (antiga classe Credencial do CLI)
+// A atividade lista só os cinco modelos de negócio, mas o login precisa
+// "verificar o hash da senha armazenado no banco de dados" - logo, as
+// credenciais também migram para uma tabela.
+// -----------------------------------------------------------------------------
+
+model Usuario {
+  id           String       @id @default(uuid()) @db.Uuid
+  usuario      String       @unique @db.VarChar(60)
+  // bcrypt ("$2b$...") ou legado do CLI ("sha256$<salt>$<hex>"), migrado no login
+  hashSenha    String       @map("hash_senha")
+  papel        PapelUsuario
+  ativo        Boolean      @default(true)
+  ultimoAcesso DateTime?    @map("ultimo_acesso") @db.Timestamptz(3)
+  // Incrementado em logout/troca de senha: invalida todos os JWT já emitidos
+  versaoToken  Int          @default(0) @map("versao_token")
+  versao       Int          @default(0)
+  criadoEm     DateTime     @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm DateTime     @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  @@map("usuarios")
+}
+
+// -----------------------------------------------------------------------------
+// Domínio
+// -----------------------------------------------------------------------------
+
+model Organizacao {
+  id                String    @id @default(uuid()) @db.Uuid
+  // Código curto de negócio usado pelo CLI ("lote criar --org BR001")
+  codigo            String    @unique @db.VarChar(20)
+  razaoSocial       String    @map("razao_social") @db.VarChar(200)
+  // 14 caracteres sem máscara; aceita o CNPJ alfanumérico (IN RFB 2.229/2024)
+  cnpj              String    @unique @db.Char(14)
+  inscricaoEstadual String?   @map("inscricao_estadual") @db.VarChar(20)
+  enderecoCompleto  String    @map("endereco_completo") @db.VarChar(400)
+  telefone          String?   @db.VarChar(20)
+  email             String    @db.VarChar(200)
+  dataCadastro      DateTime  @default(now()) @map("data_cadastro") @db.Timestamptz(3)
+  ativo             Boolean   @default(true)
+  versao            Int       @default(0)
+  atualizadoEm      DateTime  @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  // 1 : 0..1  (o lado "dono" da FK é o Contrato, ver organizacaoId @unique)
+  contrato          Contrato?
+  // 1 : 0..*
+  lotes             Lote[]
+
+  @@map("organizacoes")
+}
+
+model Contrato {
+  id                  String      @id @default(uuid()) @db.Uuid
+  organizacaoId       String      @unique @map("organizacao_id") @db.Uuid
+  dataAssinatura      DateTime    @map("data_assinatura") @db.Date
+  dataVencimento      DateTime    @map("data_vencimento") @db.Date
+  // Lista de cláusulas armazenada como JSONB (dado semiestruturado)
+  clausulas           Json        @db.JsonB
+  valorMensal         Decimal     @map("valor_mensal") @db.Decimal(12, 2)
+  renovacaoAutomatica Boolean     @default(false) @map("renovacao_automatica")
+  versao              Int         @default(0)
+  criadoEm            DateTime    @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm        DateTime    @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  organizacao         Organizacao @relation(fields: [organizacaoId], references: [id], onDelete: Restrict)
+
+  @@map("contratos")
+}
+
+model Lote {
+  id                 String        @id @default(uuid()) @db.Uuid
+  organizacaoId      String        @map("organizacao_id") @db.Uuid
+  dataEntrada        DateTime      @map("data_entrada") @db.Timestamptz(3)
+  notaFiscal         String        @map("nota_fiscal") @db.VarChar(60)
+  transportadora     String        @db.VarChar(200)
+  statusProcessamento StatusLote   @default(RECEBIDO) @map("status_processamento")
+  observacoes        String?
+  versao             Int           @default(0)
+  criadoEm           DateTime      @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm       DateTime      @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  organizacao        Organizacao   @relation(fields: [organizacaoId], references: [id], onDelete: Restrict)
+  // 1 : 1..*  (o mínimo de 1 é garantido na criação transacional do lote)
+  equipamentos       Equipamento[]
+
+  // A mesma nota fiscal não pode entrar duas vezes para a mesma organização
+  @@unique([organizacaoId, notaFiscal])
+  @@index([dataEntrada])
+  @@index([statusProcessamento])
+  @@map("lotes")
+}
+
+model Equipamento {
+  id                  String             @id @default(uuid()) @db.Uuid
+  codigoBarrasInterno String             @unique @map("codigo_barras_interno") @db.VarChar(20)
+  tipo                TipoEquipamento
+  marca               String             @db.VarChar(100)
+  modelo              String             @db.VarChar(100)
+  anoFabricacao       Int                @map("ano_fabricacao")
+  estadoFisico        EstadoFisico       @map("estado_fisico")
+  pesoQuilogramas     Decimal            @map("peso_quilogramas") @db.Decimal(10, 3)
+  loteId              String             @map("lote_id") @db.Uuid
+  posicaoNoLote       Int                @map("posicao_no_lote")
+  statusRastreamento  StatusRastreamento @default(AGUARDANDO_TRIAGEM) @map("status_rastreamento")
+  versao              Int                @default(0)
+  criadoEm            DateTime           @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm        DateTime           @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  lote                Lote               @relation(fields: [loteId], references: [id], onDelete: Restrict)
+  // 1 : 0..*
+  movimentacoes       Movimentacao[]
+
+  @@unique([loteId, posicaoNoLote])
+  @@index([statusRastreamento])
+  @@map("equipamentos")
+}
+
+// Histórico imutável (append-only): um trigger no banco bloqueia UPDATE/DELETE.
+model Movimentacao {
+  id            String      @id @default(uuid()) @db.Uuid
+  equipamentoId String      @map("equipamento_id") @db.Uuid
+  dataHora      DateTime    @default(now()) @map("data_hora") @db.Timestamptz(3)
+  origem        String      @db.VarChar(100)
+  destino       String      @db.VarChar(100)
+  responsavel   String      @db.VarChar(60)
+  observacao    String?
+  // Mantido por uniformidade com os demais modelos; como a tabela é
+  // append-only (trigger), o valor nunca passa de 0.
+  versao        Int         @default(0)
+
+  // Cascade só é permitido ao remover um equipamento de um lote ainda RECEBIDO
+  equipamento   Equipamento @relation(fields: [equipamentoId], references: [id], onDelete: Cascade)
+
+  @@index([equipamentoId, dataHora])
+  @@map("movimentacoes")
+}
+
+// Sucessor do JournalTransacao do CLI: cada operação de escrita grava aqui,
+// dentro da MESMA transação, o estado antes/depois. Retenção mínima de 180 dias
+// garantida por trigger.
+model JournalTransacao {
+  id                 BigInt   @id @default(autoincrement())
+  timestamp          DateTime @default(now()) @db.Timestamptz(3)
+  operacao           String   @db.VarChar(40)
+  entidade           String   @db.VarChar(40)
+  entidadeId         String   @map("entidade_id") @db.VarChar(60)
+  dadosAntes         Json?    @map("dados_antes") @db.JsonB
+  dadosDepois        Json?    @map("dados_depois") @db.JsonB
+  usuarioResponsavel String   @map("usuario_responsavel") @db.VarChar(60)
+
+  @@index([entidade, entidadeId])
+  @@index([timestamp])
+  @@map("journal_transacoes")
+}
