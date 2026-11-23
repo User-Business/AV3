@@ -12,7 +12,14 @@ export class EquipamentoController {
   rastrear = async (req: FastifyRequest<Entrada<R['rastrear']>>) => this.servico.rastrear(req.ator!, req.params.id);
 
   alterarStatus = async (req: FastifyRequest<Entrada<R['alterarStatus']>>) =>
-    this.servico.atualizarStatus(req.ator!, req.params.id, req.body.versao, req.body.status, req.body.justificativa);
+    this.servico.atualizarStatus(
+      req.ator!,
+      req.params.id,
+      req.body.versao,
+      req.body.status,
+      req.body.justificativa,
+      req.body.valorRecuperado,
+    );
 
   alterarEstadoFisico = async (req: FastifyRequest<Entrada<R['alterarEstadoFisico']>>) =>
     this.servico.atualizarEstadoFisico(

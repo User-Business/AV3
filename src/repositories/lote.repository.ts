@@ -23,6 +23,40 @@ export class LoteRepository {
     return this.db.lote.findUnique({ where: { id }, include: INCLUIR_DETALHES });
   }
 
+  /** Busca restrita a uma organização (parceiro da API pública). */
+  buscarDaOrganizacao(id: string, organizacaoId: string): Promise<LoteComEquipamentos | null> {
+    return this.db.lote.findFirst({ where: { id, organizacaoId }, include: INCLUIR_DETALHES });
+  }
+
+  /** Listagem paginada de uma organização (API pública). */
+  async listarDaOrganizacao(filtro: {
+    organizacaoId: string;
+    inicio?: Date;
+    fim?: Date;
+    status?: StatusLote;
+    pagina: number;
+    tamanho: number;
+  }) {
+    const where: Prisma.LoteWhereInput = {
+      organizacaoId: filtro.organizacaoId,
+      ...(filtro.status ? { statusProcessamento: filtro.status } : {}),
+      ...(filtro.inicio || filtro.fim
+        ? { dataEntrada: { ...(filtro.inicio ? { gte: filtro.inicio } : {}), ...(filtro.fim ? { lte: filtro.fim } : {}) } }
+        : {}),
+    };
+    const [itens, total] = await Promise.all([
+      this.db.lote.findMany({
+        where,
+        include: { _count: { select: { equipamentos: true } } },
+        orderBy: { dataEntrada: 'desc' },
+        skip: (filtro.pagina - 1) * filtro.tamanho,
+        take: filtro.tamanho,
+      }),
+      this.db.lote.count({ where }),
+    ]);
+    return { itens, total };
+  }
+
   async buscarOuFalhar(id: string): Promise<LoteComEquipamentos> {
     const lote = await this.buscarPorId(id);
     if (!lote) throw new ErroNaoEncontrado('Lote', id);

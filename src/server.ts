@@ -2,13 +2,25 @@ import 'dotenv/config';
 import { construirApp } from './app.js';
 import { carregarConfiguracao } from './config.js';
 import { criarPrismaClient } from './database.js';
+import { iniciarAgendador } from './infra/agendador.js';
+import { criarFila } from './infra/fila.js';
 
 const TEMPO_MAXIMO_ENCERRAMENTO_MS = 10_000;
 
 async function iniciar(): Promise<void> {
   const config = carregarConfiguracao();
   const prisma = criarPrismaClient(config.databaseUrl);
-  const app = await construirApp({ config, prisma });
+  const fila = criarFila(config);
+  const { app, servicos } = await construirApp({ config, prisma, fila });
+
+  // Fila em memória só pode ser consumida neste processo; com BullMQ o
+  // consumo pode ficar em workers dedicados (npm run start:worker)
+  if (config.workerEmbutido || fila.driver === 'memoria') {
+    await fila.consumir(servicos.relatorioAssincrono.processar);
+    const republicadas = await servicos.relatorioAssincrono.republicarInterrompidas();
+    if (republicadas) app.log.info({ republicadas }, 'tarefas interrompidas republicadas na fila');
+  }
+  const agendador = iniciarAgendador(servicos, config, app.log);
 
   let encerrando = false;
 
@@ -32,6 +44,10 @@ async function iniciar(): Promise<void> {
     }, TEMPO_MAXIMO_ENCERRAMENTO_MS);
     forcar.unref();
     try {
+      // Ordem: para o agendador, deixa as requisições e as tarefas em andamento
+      // terminarem e só então fecha o pool do banco (hook onClose do app)
+      await agendador.parar();
+      await fila.encerrar();
       await app.close();
       app.log.info('servidor encerrado com sucesso');
       process.exit(codigoSaida);
@@ -55,7 +71,7 @@ async function iniciar(): Promise<void> {
   });
 
   await app.listen({ port: config.porta, host: config.host });
-  app.log.info(`documentação em http://localhost:${config.porta}/docs`);
+  app.log.info(`documentação em http://localhost:${config.porta}/docs | fila: ${fila.driver}`);
 }
 
 iniciar().catch((erro: unknown) => {

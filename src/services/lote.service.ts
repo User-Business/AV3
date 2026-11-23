@@ -5,6 +5,7 @@ import {
   type TipoEquipamento,
 } from '../generated/prisma/client.js';
 import { exigirPermissao, type Ator } from '../domain/autorizacao.js';
+import { exigirEscopo, type ParceiroAutenticado } from '../domain/chave-api.js';
 import { contratoParaDominio, equipamentoDTO, equipamentoParaDominio, loteDTO, loteParaDominio } from './dto.js';
 import { Equipamento, gerarCodigoBarras } from '../domain/equipamento.js';
 import { ErroConflito, ErroNaoEncontrado, ErroRegraNegocio, ErroValidacao } from '../domain/erros.js';
@@ -30,6 +31,9 @@ export interface DadosNovoLote {
   equipamentos: DadosNovoEquipamento[];
 }
 
+/** Lote submetido por parceiro: a organização é sempre a da chave de API. */
+export type DadosLoteParceiro = Omit<DadosNovoLote, 'organizacao'>;
+
 export const MAXIMO_EQUIPAMENTOS_POR_REQUISICAO = 500;
 
 export class LoteService {
@@ -41,7 +45,16 @@ export class LoteService {
    */
   async criar(ator: Ator, dados: DadosNovoLote, agora = new Date()) {
     exigirPermissao(ator, 'lote:escrever');
+    return this.criarLote(ator.usuario, dados, agora);
+  }
 
+  /** Submissão pela API pública: mesmas regras, organização fixada pela chave. */
+  async criarPorParceiro(parceiro: ParceiroAutenticado, dados: DadosLoteParceiro, agora = new Date()) {
+    exigirEscopo(parceiro, 'LOTES_ESCRITA');
+    return this.criarLote(`parceiro:${parceiro.nome}`.slice(0, 60), { ...dados, organizacao: parceiro.organizacaoId }, agora, parceiro.parceiroId);
+  }
+
+  private async criarLote(responsavel: string, dados: DadosNovoLote, agora: Date, parceiroOrigemId?: string) {
     const dataEntrada = new Date(dados.dataEntrada);
     validarDataEntrada(dataEntrada, agora);
     if (dados.equipamentos.length === 0) {
@@ -69,11 +82,12 @@ export class LoteService {
         notaFiscal,
         transportadora: dados.transportadora.trim(),
         observacoes: dados.observacoes?.trim() || null,
+        parceiroOrigemId: parceiroOrigemId ?? null,
       });
 
       let posicao = 1;
       for (const equipamento of dados.equipamentos) {
-        await incluirEquipamento(repos, ator, lote.id, posicao++, equipamento, `ORGANIZACAO:${org.codigo}`);
+        await incluirEquipamento(repos, responsavel, lote.id, posicao++, equipamento, `ORGANIZACAO:${org.codigo}`);
       }
 
       const criado = await repos.lotes.buscarOuFalhar(lote.id);
@@ -82,7 +96,7 @@ export class LoteService {
         entidade: 'Lote',
         entidadeId: lote.id,
         dadosDepois: { ...loteDTO(criado), equipamentos: criado.equipamentos.map((e) => e.codigoBarrasInterno) },
-        usuarioResponsavel: ator.usuario,
+        usuarioResponsavel: responsavel,
       });
       return loteDTO(criado);
     });
@@ -99,7 +113,7 @@ export class LoteService {
       await repos.lotes.atualizar(lote.id, versao);
       const posicao = await repos.lotes.proximaPosicao(lote.id);
       const equipamento = await incluirEquipamento(
-        repos, ator, lote.id, posicao, dados, `ORGANIZACAO:${lote.organizacao.codigo}`,
+        repos, ator.usuario, lote.id, posicao, dados, `ORGANIZACAO:${lote.organizacao.codigo}`,
       );
       await repos.historico.registrarJournal({
         operacao: 'ADICIONAR_EQUIPAMENTO',
@@ -145,7 +159,13 @@ export class LoteService {
     return this.uow.emTransacao(async (repos) => {
       const lote = await repos.lotes.buscarOuFalhar(loteId);
       const transicao = loteParaDominio(lote).avancarStatus(novoStatus);
-      await repos.lotes.atualizar(lote.id, versao, { statusProcessamento: novoStatus });
+      // Marcos da triagem (Atividade 3): insumo da análise de eficiência operacional
+      const agora = new Date();
+      await repos.lotes.atualizar(lote.id, versao, {
+        statusProcessamento: novoStatus,
+        ...(novoStatus === StatusLote.EM_TRIAGEM ? { inicioTriagemEm: agora } : {}),
+        ...(novoStatus === StatusLote.TRIAGEM_CONCLUIDA ? { conclusaoTriagemEm: agora, responsavelTriagem: ator.usuario } : {}),
+      });
 
       if (novoStatus === StatusLote.EM_TRIAGEM) {
         for (const registro of await repos.equipamentos.listarEmPreTriagemDoLote(lote.id)) {
@@ -177,6 +197,45 @@ export class LoteService {
   async buscar(ator: Ator, id: string) {
     exigirPermissao(ator, 'lote:ler');
     return loteDTO(await this.uow.leitura.lotes.buscarOuFalhar(id));
+  }
+
+  // ------------------------------------------------------ API pública
+
+  async buscarParaParceiro(parceiro: ParceiroAutenticado, id: string) {
+    exigirEscopo(parceiro, 'LOTES_LEITURA');
+    const lote = await this.uow.leitura.lotes.buscarDaOrganizacao(id, parceiro.organizacaoId);
+    // 404 também para lote de outra organização: não revela que ele existe
+    if (!lote) throw new ErroNaoEncontrado('Lote', id);
+    return loteDTO(lote);
+  }
+
+  async listarParaParceiro(
+    parceiro: ParceiroAutenticado,
+    filtro: { inicio?: string; fim?: string; status?: StatusLote; pagina: number; tamanho: number },
+  ) {
+    exigirEscopo(parceiro, 'LOTES_LEITURA');
+    const { itens, total } = await this.uow.leitura.lotes.listarDaOrganizacao({
+      organizacaoId: parceiro.organizacaoId,
+      pagina: filtro.pagina,
+      tamanho: filtro.tamanho,
+      ...(filtro.status ? { status: filtro.status } : {}),
+      ...(filtro.inicio ? { inicio: new Date(`${filtro.inicio}T00:00:00.000Z`) } : {}),
+      ...(filtro.fim ? { fim: new Date(`${filtro.fim}T23:59:59.999Z`) } : {}),
+    });
+    return {
+      pagina: filtro.pagina,
+      tamanho: filtro.tamanho,
+      total,
+      itens: itens.map((l) => ({
+        id: l.id,
+        dataEntrada: l.dataEntrada.toISOString(),
+        notaFiscal: l.notaFiscal,
+        transportadora: l.transportadora,
+        statusProcessamento: l.statusProcessamento,
+        quantidadeEquipamentos: l._count.equipamentos,
+        conclusaoTriagemEm: l.conclusaoTriagemEm?.toISOString() ?? null,
+      })),
+    };
   }
 
   async consultarPorPeriodo(
@@ -246,7 +305,7 @@ async function obterOrganizacao(repos: Repositorios, idOuCodigo: string) {
 
 async function incluirEquipamento(
   repos: Repositorios,
-  ator: Ator,
+  responsavel: string,
   loteId: string,
   posicao: number,
   dados: DadosNovoEquipamento,
@@ -263,13 +322,22 @@ async function incluirEquipamento(
     pesoQuilogramas: dados.pesoQuilogramas,
     loteId,
     posicaoNoLote: posicao,
+    inservivelEm: dados.estadoFisico === 'INSERVIVEL' ? new Date() : null,
   });
   await repos.historico.registrarMovimentacao({
     equipamentoId: criado.id,
     origem,
     destino: criado.statusRastreamento,
-    responsavel: ator.usuario,
+    responsavel,
     observacao: 'Entrada no almoxarifado',
+  });
+  // Primeiro ponto da série temporal de estado físico (análise de vida útil)
+  await repos.historico.registrarEstadoFisico({
+    equipamentoId: criado.id,
+    estadoAnterior: null,
+    estadoNovo: criado.estadoFisico,
+    responsavel,
+    justificativa: 'Estado na entrada',
   });
   return criado;
 }

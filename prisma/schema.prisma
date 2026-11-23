@@ -1,5 +1,11 @@
 // =============================================================================
-// greencode - modelo relacional (Atividade 2)
+// greencode - modelo relacional (Atividades 2 e 3)
+//
+// A Atividade 3 acrescenta, sem alterar o que já existia:
+//  - colunas de rastreio da triagem e do valor recuperado (insumo analítico);
+//  - histórico de estado físico (série temporal para a análise de vida útil);
+//  - tabelas da camada analítica (execuções imutáveis + métricas);
+//  - parceiros, chaves de API e tarefas assíncronas de relatório.
 //
 // Convenções:
 //  - Modelos e campos em camelCase no TypeScript; tabelas/colunas em snake_case
@@ -124,6 +130,7 @@ model Organizacao {
   contrato          Contrato?
   // 1 : 0..*
   lotes             Lote[]
+  parceiros         Parceiro[]
 
   @@map("organizacoes")
 }
@@ -154,6 +161,12 @@ model Lote {
   transportadora     String        @db.VarChar(200)
   statusProcessamento StatusLote   @default(RECEBIDO) @map("status_processamento")
   observacoes        String?
+  // Atividade 3: marcos da triagem, base da análise de eficiência operacional
+  inicioTriagemEm    DateTime?     @map("inicio_triagem_em") @db.Timestamptz(3)
+  conclusaoTriagemEm DateTime?     @map("conclusao_triagem_em") @db.Timestamptz(3)
+  responsavelTriagem String?       @map("responsavel_triagem") @db.VarChar(60)
+  // Preenchido quando o lote chega pela API pública
+  parceiroOrigemId   String?       @map("parceiro_origem_id") @db.Uuid
   versao             Int           @default(0)
   criadoEm           DateTime      @default(now()) @map("criado_em") @db.Timestamptz(3)
   atualizadoEm       DateTime      @updatedAt @map("atualizado_em") @db.Timestamptz(3)
@@ -166,6 +179,7 @@ model Lote {
   @@unique([organizacaoId, notaFiscal])
   @@index([dataEntrada])
   @@index([statusProcessamento])
+  @@index([conclusaoTriagemEm])
   @@map("lotes")
 }
 
@@ -181,6 +195,10 @@ model Equipamento {
   loteId              String             @map("lote_id") @db.Uuid
   posicaoNoLote       Int                @map("posicao_no_lote")
   statusRastreamento  StatusRastreamento @default(AGUARDANDO_TRIAGEM) @map("status_rastreamento")
+  // Atividade 3: valor efetivamente obtido no reaproveitamento/reciclagem
+  valorRecuperado     Decimal?           @map("valor_recuperado") @db.Decimal(12, 2)
+  // Momento em que o equipamento foi classificado como INSERVIVEL
+  inservivelEm        DateTime?          @map("inservivel_em") @db.Timestamptz(3)
   versao              Int                @default(0)
   criadoEm            DateTime           @default(now()) @map("criado_em") @db.Timestamptz(3)
   atualizadoEm        DateTime           @updatedAt @map("atualizado_em") @db.Timestamptz(3)
@@ -188,9 +206,11 @@ model Equipamento {
   lote                Lote               @relation(fields: [loteId], references: [id], onDelete: Restrict)
   // 1 : 0..*
   movimentacoes       Movimentacao[]
+  historicoEstados    HistoricoEstadoFisico[]
 
   @@unique([loteId, posicaoNoLote])
   @@index([statusRastreamento])
+  @@index([tipo])
   @@map("equipamentos")
 }
 
@@ -230,4 +250,228 @@ model JournalTransacao {
   @@index([entidade, entidadeId])
   @@index([timestamp])
   @@map("journal_transacoes")
+}
+
+// =============================================================================
+// Atividade 3
+// =============================================================================
+
+// Série temporal do estado físico (append-only, como Movimentacao). Cada
+// avaliação vira um ponto (idade, nível) na regressão de vida útil.
+model HistoricoEstadoFisico {
+  id             String        @id @default(uuid()) @db.Uuid
+  equipamentoId  String        @map("equipamento_id") @db.Uuid
+  dataHora       DateTime      @default(now()) @map("data_hora") @db.Timestamptz(3)
+  estadoAnterior EstadoFisico? @map("estado_anterior")
+  estadoNovo     EstadoFisico  @map("estado_novo")
+  justificativa  String?
+  responsavel    String        @db.VarChar(60)
+
+  equipamento    Equipamento   @relation(fields: [equipamentoId], references: [id], onDelete: Cascade)
+
+  @@index([equipamentoId, dataHora])
+  @@map("historico_estado_fisico")
+}
+
+// -----------------------------------------------------------------------------
+// Camada analítica: cada execução é imutável; as métricas ficam em tabelas
+// filhas tipadas (consultáveis em SQL), não em um JSON opaco.
+// -----------------------------------------------------------------------------
+
+enum TipoAnalise {
+  EFICIENCIA_OPERACIONAL
+  RENTABILIDADE
+  VIDA_UTIL
+}
+
+enum OrigemExecucao {
+  AGENDADA
+  SOB_DEMANDA
+  API_PUBLICA
+}
+
+enum DimensaoEficiencia {
+  GERAL
+  OPERADOR
+  MES
+}
+
+enum MetodoPrevisao {
+  MINIMOS_QUADRADOS
+  SUAVIZACAO_EXPONENCIAL
+}
+
+model ExecucaoAnalise {
+  id            String         @id @default(uuid()) @db.Uuid
+  tipo          TipoAnalise
+  origem        OrigemExecucao
+  // Nulo = base completa
+  organizacaoId String?        @map("organizacao_id") @db.Uuid
+  periodoInicio DateTime?      @map("periodo_inicio") @db.Timestamptz(3)
+  periodoFim    DateTime?      @map("periodo_fim") @db.Timestamptz(3)
+  amostras      Int
+  resumo        Json           @db.JsonB
+  duracaoMs     Int            @map("duracao_ms")
+  geradaEm      DateTime       @default(now()) @map("gerada_em") @db.Timestamptz(3)
+
+  metricasEficiencia    MetricaEficiencia[]
+  metricasRentabilidade MetricaRentabilidade[]
+  previsoesVidaUtil     PrevisaoVidaUtil[]
+
+  @@index([tipo, geradaEm])
+  @@map("execucoes_analise")
+}
+
+model MetricaEficiencia {
+  id                String             @id @default(uuid()) @db.Uuid
+  execucaoId        String             @map("execucao_id") @db.Uuid
+  dimensao          DimensaoEficiencia
+  chave             String             @db.VarChar(60)
+  rotulo            String             @db.VarChar(100)
+  quantidadeLotes   Int                @map("quantidade_lotes")
+  mediaHoras        Float              @map("media_horas")
+  medianaHoras      Float              @map("mediana_horas")
+  desvioPadraoHoras Float              @map("desvio_padrao_horas")
+  percentil90Horas  Float              @map("percentil90_horas")
+  gargalo           Boolean
+
+  execucao          ExecucaoAnalise    @relation(fields: [execucaoId], references: [id], onDelete: Cascade)
+
+  @@index([execucaoId])
+  @@map("metricas_eficiencia")
+}
+
+model MetricaRentabilidade {
+  id              String          @id @default(uuid()) @db.Uuid
+  execucaoId      String          @map("execucao_id") @db.Uuid
+  tipo            TipoEquipamento
+  estadoFisico    EstadoFisico?   @map("estado_fisico")
+  marca           String?         @db.VarChar(100)
+  modelo          String?         @db.VarChar(100)
+  amostras        Int
+  valorMedio      Float           @map("valor_medio")
+  valorMediano    Float           @map("valor_mediano")
+  desvioPadrao    Float           @map("desvio_padrao")
+  valorTotal      Float           @map("valor_total")
+  valorMedioPorKg Float           @map("valor_medio_por_kg")
+
+  execucao        ExecucaoAnalise @relation(fields: [execucaoId], references: [id], onDelete: Cascade)
+
+  @@index([execucaoId])
+  @@map("metricas_rentabilidade")
+}
+
+model PrevisaoVidaUtil {
+  id                  String          @id @default(uuid()) @db.Uuid
+  execucaoId          String          @map("execucao_id") @db.Uuid
+  tipo                TipoEquipamento
+  metodo              MetodoPrevisao
+  amostras            Int
+  // Níveis de estado perdidos por ano (inclinação da reta)
+  coeficienteAngular  Float?          @map("coeficiente_angular")
+  intercepto          Float?
+  r2                  Float?
+  idadeInservivelAnos Float?          @map("idade_inservivel_anos")
+  suficiente          Boolean
+  observacao          String?
+
+  execucao            ExecucaoAnalise @relation(fields: [execucaoId], references: [id], onDelete: Cascade)
+
+  @@index([execucaoId])
+  @@index([tipo])
+  @@map("previsoes_vida_util")
+}
+
+// -----------------------------------------------------------------------------
+// API pública: parceiros, chaves e tarefas assíncronas
+// -----------------------------------------------------------------------------
+
+enum PlanoAcesso {
+  BASICO
+  PROFISSIONAL
+  CORPORATIVO
+}
+
+enum EscopoChave {
+  RASTREABILIDADE_LEITURA
+  LOTES_LEITURA
+  LOTES_ESCRITA
+  ANALISES_LEITURA
+  RELATORIOS_SOLICITAR
+}
+
+model Parceiro {
+  id            String      @id @default(uuid()) @db.Uuid
+  nome          String      @db.VarChar(120)
+  // O parceiro só enxerga dados desta organização
+  organizacaoId String      @map("organizacao_id") @db.Uuid
+  plano         PlanoAcesso @default(BASICO)
+  ativo         Boolean     @default(true)
+  versao        Int         @default(0)
+  criadoEm      DateTime    @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm  DateTime    @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  organizacao   Organizacao @relation(fields: [organizacaoId], references: [id], onDelete: Restrict)
+  chaves        ChaveApi[]
+  tarefas       TarefaRelatorio[]
+
+  @@map("parceiros")
+}
+
+model ChaveApi {
+  id          String        @id @default(uuid()) @db.Uuid
+  parceiroId  String        @map("parceiro_id") @db.Uuid
+  // Parte pública da chave, usada para localizá-la
+  prefixo     String        @unique @db.Char(12)
+  // SHA-256 do segredo; o segredo em claro nunca é persistido
+  hashSegredo String        @map("hash_segredo") @db.Char(64)
+  descricao   String?       @db.VarChar(200)
+  escopos     EscopoChave[]
+  criadaEm    DateTime      @default(now()) @map("criada_em") @db.Timestamptz(3)
+  expiraEm    DateTime?     @map("expira_em") @db.Timestamptz(3)
+  revogadaEm  DateTime?     @map("revogada_em") @db.Timestamptz(3)
+  ultimoUso   DateTime?     @map("ultimo_uso") @db.Timestamptz(3)
+
+  parceiro    Parceiro      @relation(fields: [parceiroId], references: [id], onDelete: Restrict)
+
+  @@index([parceiroId])
+  @@map("chaves_api")
+}
+
+enum StatusTarefa {
+  PENDENTE
+  PROCESSANDO
+  CONCLUIDA
+  FALHOU
+}
+
+enum FormatoRelatorio {
+  JSON
+  CSV
+}
+
+model TarefaRelatorio {
+  id            String           @id @default(uuid()) @db.Uuid
+  parceiroId    String?          @map("parceiro_id") @db.Uuid
+  solicitante   String           @db.VarChar(160)
+  organizacaoId String           @map("organizacao_id") @db.Uuid
+  tipo          String           @db.VarChar(40)
+  formato       FormatoRelatorio
+  status        StatusTarefa     @default(PENDENTE)
+  tentativas    Int              @default(0)
+  maxTentativas Int              @default(3) @map("max_tentativas")
+  erro          String?
+  arquivo       String?          @db.VarChar(120)
+  tamanhoBytes  Int?             @map("tamanho_bytes")
+  webhookUrl    String?          @map("webhook_url") @db.VarChar(500)
+  criadaEm      DateTime         @default(now()) @map("criada_em") @db.Timestamptz(3)
+  iniciadaEm    DateTime?        @map("iniciada_em") @db.Timestamptz(3)
+  concluidaEm   DateTime?        @map("concluida_em") @db.Timestamptz(3)
+  expiraEm      DateTime?        @map("expira_em") @db.Timestamptz(3)
+
+  parceiro      Parceiro?        @relation(fields: [parceiroId], references: [id], onDelete: SetNull)
+
+  @@index([parceiroId, criadaEm])
+  @@index([status])
+  @@map("tarefas_relatorio")
 }

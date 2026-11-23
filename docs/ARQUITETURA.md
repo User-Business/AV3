@@ -1,5 +1,8 @@
 # greencode: decisões de arquitetura (Atividade 2)
 
+> As decisões da Atividade 3 (camada analítica, API pública e processamento assíncrono) estão em
+> [RELATORIO_TECNICO.md](RELATORIO_TECNICO.md). As decisões abaixo continuam valendo.
+
 Este documento justifica as escolhas feitas na migração do greencode de CLI com arquivos
 criptografados para um servidor monolítico com banco relacional. Para cada decisão ele registra
 os trade-offs considerados e as alternativas rejeitadas.

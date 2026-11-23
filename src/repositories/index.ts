@@ -1,10 +1,13 @@
 import type { Db } from '../database.js';
 import type { PrismaClient } from '../generated/prisma/client.js';
+import { AnaliseRepository } from './analise.repository.js';
 import { ContratoRepository } from './contrato.repository.js';
 import { EquipamentoRepository } from './equipamento.repository.js';
 import { HistoricoRepository } from './historico.repository.js';
 import { LoteRepository } from './lote.repository.js';
 import { OrganizacaoRepository } from './organizacao.repository.js';
+import { ParceiroRepository } from './parceiro.repository.js';
+import { TarefaRepository } from './tarefa.repository.js';
 import { UsuarioRepository } from './usuario.repository.js';
 
 /** Conjunto de repositórios ligados a um mesmo cliente (raiz ou transação). */
@@ -15,6 +18,10 @@ export class Repositorios {
   readonly lotes: LoteRepository;
   readonly equipamentos: EquipamentoRepository;
   readonly historico: HistoricoRepository;
+  // Atividade 3
+  readonly analises: AnaliseRepository;
+  readonly parceiros: ParceiroRepository;
+  readonly tarefas: TarefaRepository;
 
   constructor(db: Db) {
     this.usuarios = new UsuarioRepository(db);
@@ -23,6 +30,9 @@ export class Repositorios {
     this.lotes = new LoteRepository(db);
     this.equipamentos = new EquipamentoRepository(db);
     this.historico = new HistoricoRepository(db);
+    this.analises = new AnaliseRepository(db);
+    this.parceiros = new ParceiroRepository(db);
+    this.tarefas = new TarefaRepository(db);
   }
 }
 

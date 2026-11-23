@@ -27,6 +27,10 @@ export const PERMISSOES = {
   'equipamento:escrever': [ADMINISTRADOR, GESTOR_ALMOXARIFADO],
   'relatorio:gerar': [ADMINISTRADOR, AUDITOR],
   'auditoria:ler': [ADMINISTRADOR, AUDITOR],
+  // Atividade 3
+  'analise:ler': TODOS,
+  'analise:executar': [ADMINISTRADOR, AUDITOR, GESTOR_ALMOXARIFADO],
+  'parceiro:gerenciar': [ADMINISTRADOR],
 } as const satisfies Record<string, readonly PapelUsuario[]>;
 
 export type Permissao = keyof typeof PERMISSOES;

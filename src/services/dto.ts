@@ -1,6 +1,7 @@
 import type {
   Contrato,
   Equipamento,
+  HistoricoEstadoFisico,
   JournalTransacao,
   Movimentacao,
   Usuario,
@@ -99,7 +100,18 @@ export function equipamentoDTO(e: Equipamento) {
     posicaoNoLote: e.posicaoNoLote,
     statusRastreamento: e.statusRastreamento,
     depreciacao: equipamentoParaDominio(e).calcularDepreciacao(),
+    valorRecuperado: e.valorRecuperado === null ? null : e.valorRecuperado.toFixed(2),
     versao: e.versao,
+  };
+}
+
+export function historicoEstadoDTO(h: HistoricoEstadoFisico) {
+  return {
+    dataHora: h.dataHora.toISOString(),
+    estadoAnterior: h.estadoAnterior,
+    estadoNovo: h.estadoNovo,
+    justificativa: h.justificativa,
+    responsavel: h.responsavel,
   };
 }
 
@@ -131,6 +143,9 @@ export function loteDTO(l: LoteComEquipamentos) {
     transportadora: l.transportadora,
     statusProcessamento: l.statusProcessamento,
     observacoes: l.observacoes,
+    inicioTriagemEm: l.inicioTriagemEm?.toISOString() ?? null,
+    conclusaoTriagemEm: l.conclusaoTriagemEm?.toISOString() ?? null,
+    responsavelTriagem: l.responsavelTriagem,
     pesoTotalQuilogramas: loteParaDominio(l).calcularPesoTotal(),
     quantidadeEquipamentos: l.equipamentos.length,
     versao: l.versao,
@@ -149,6 +164,7 @@ export function rastreioDTO(e: EquipamentoRastreado) {
     },
     organizacao: e.lote.organizacao,
     movimentacoes: e.movimentacoes.map(movimentacaoDTO),
+    historicoEstadoFisico: e.historicoEstados.map(historicoEstadoDTO),
   };
 }
 

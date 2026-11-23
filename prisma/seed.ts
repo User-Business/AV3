@@ -16,7 +16,9 @@ import { dataCalendario } from '../src/domain/contrato.js';
 import { ErroDominio } from '../src/domain/erros.js';
 import { gerarHashLegadoSha256, gerarHashSenha } from '../src/domain/senha.js';
 import type { DadosNovoEquipamento } from '../src/services/lote.service.js';
-import type { StatusRastreamento } from '../src/generated/prisma/enums.js';
+import type { EstadoFisico, StatusRastreamento, TipoEquipamento } from '../src/generated/prisma/enums.js';
+import { ajustarModelosVidaUtil, idadeEmAnos, nivelEstado } from '../src/domain/analises.js';
+import { ORDEM_ESTADO_FISICO, gerarCodigoBarras } from '../src/domain/equipamento.js';
 
 const config = carregarConfiguracao({ ...process.env, JWT_SECRET: process.env.JWT_SECRET ?? 'x'.repeat(32) });
 const prisma = criarPrismaClient(config.databaseUrl);
@@ -255,8 +257,180 @@ async function main() {
   await deveFalhar('auditor tentando criar lote (sem permissão)', () =>
     s.lote.criar({ ...ATOR_SISTEMA, papel: 'AUDITOR' }, { organizacao: 'BR001', notaFiscal: 'X6', transportadora: 'T', dataEntrada: diasAtras(1), equipamentos: umEquip }));
 
+  await popularHistoricoAnalitico(ator);
+
   console.log('\nSeed concluído. Credenciais de DESENVOLVIMENTO (troque em produção):');
   console.log('  admin/Admin@2026  cadastro/Cadastro@2026  almoxarifado/Almox@2026  auditor/Auditor@2026  legado/Legado@2026');
+  console.log('  almox.ana / almox.bruno / almox.carla com senha Almox@2026');
+}
+
+// =============================================================================
+// Atividade 3: histórico para a camada analítica e parceiro da API pública
+// =============================================================================
+
+/** Gerador pseudoaleatório com semente fixa: o seed produz sempre os mesmos dados. */
+function criarAleatorio(semente: number) {
+  let estado = semente;
+  const proximo = () => {
+    estado = (estado * 1103515245 + 12345) % 2147483648;
+    return estado / 2147483648;
+  };
+  return {
+    proximo,
+    inteiro: (min: number, max: number) => Math.floor(proximo() * (max - min + 1)) + min,
+    escolher: <T>(lista: readonly T[]): T => lista[Math.floor(proximo() * lista.length)]!,
+  };
+}
+
+const CATALOGO: Record<TipoEquipamento, { modelos: [string, string][]; peso: [number, number]; degradacaoAnual: number; valorBase: number }> = {
+  COMPUTADOR_MESA: { modelos: [['Dell', 'OptiPlex 7070'], ['HP', 'ProDesk 400'], ['Lenovo', 'ThinkCentre M720']], peso: [6, 9], degradacaoAnual: 0.75, valorBase: 180 },
+  NOTEBOOK: { modelos: [['Lenovo', 'ThinkPad T480'], ['Dell', 'Latitude 5490'], ['HP', 'EliteBook 840']], peso: [1.4, 2.4], degradacaoAnual: 0.95, valorBase: 260 },
+  MONITOR: { modelos: [['LG', '24MK430H'], ['Samsung', 'S22F350'], ['Dell', 'P2419H']], peso: [3, 5], degradacaoAnual: 0.6, valorBase: 70 },
+  IMPRESSORA: { modelos: [['HP', 'LaserJet M404'], ['Brother', 'HL-L2350'], ['Epson', 'EcoTank L3250']], peso: [4, 12], degradacaoAnual: 1.0, valorBase: 45 },
+  SERVIDOR: { modelos: [['Dell', 'PowerEdge R740'], ['HPE', 'ProLiant DL380'], ['Lenovo', 'ThinkSystem SR650']], peso: [18, 30], degradacaoAnual: 0.55, valorBase: 950 },
+  ROTEADOR: { modelos: [['Cisco', 'ISR 4331'], ['MikroTik', 'RB4011'], ['TP-Link', 'ER605']], peso: [0.8, 5.5], degradacaoAnual: 0.7, valorBase: 60 },
+  CABO_ESTRUTURADO: { modelos: [['Furukawa', 'Cat6 305m'], ['Nexans', 'Cat5e 305m']], peso: [9, 11], degradacaoAnual: 0.5, valorBase: 12 },
+  FONTE_ALIMENTACAO: { modelos: [['APC', 'Back-UPS 1500'], ['Corsair', 'CV550'], ['SMS', 'Station II']], peso: [1, 12], degradacaoAnual: 0.85, valorBase: 25 },
+};
+const FATOR_VALOR: Record<EstadoFisico, number> = {
+  NOVO: 1, BOM_ESTADO: 0.85, USADO_LEVE: 0.7, USADO_MODERADO: 0.55, DANIFICADO_LEVE: 0.4, DANIFICADO_GRAVE: 0.25, INSERVIVEL: 0.1,
+};
+
+/**
+ * Lotes processados nos últimos 12 meses, importados como histórico. Ficam fora
+ * da janela de 90 dias da regra de entrada (que vale para novos registros), por
+ * isso são gravados direto no banco - mas respeitando CHECKs e triggers.
+ */
+async function popularHistoricoAnalitico(ator: Ator) {
+  const aleatorio = criarAleatorio(20261123);
+  const operadores = ['almox.ana', 'almox.bruno', 'almox.carla'];
+  for (const usuario of operadores) {
+    await s.autenticacao.criarUsuario(ator, { usuario, senha: 'Almox@2026', papel: 'GESTOR_ALMOXARIFADO' });
+  }
+  // Ritmo médio de triagem (horas) por operador; almox.bruno é o gargalo proposital
+  const ritmo: Record<string, number> = { 'almox.ana': 28, 'almox.bruno': 72, 'almox.carla': 40 };
+  const organizacoes = await prisma.organizacao.findMany({ where: { codigo: { in: ['BR001', 'BR002'] } } });
+  const tipos = Object.keys(CATALOGO) as TipoEquipamento[];
+  const agora = Date.now();
+  let equipamentos = 0;
+
+  for (let i = 0; i < 40; i++) {
+    const org = organizacoes[i % organizacoes.length]!;
+    const operador = aleatorio.escolher(operadores);
+    const dataEntrada = new Date(agora - aleatorio.inteiro(95, 365) * DIA);
+    const inicioTriagem = new Date(dataEntrada.getTime() + aleatorio.inteiro(1, 6) * 3_600_000);
+    const conclusao = new Date(inicioTriagem.getTime() + ritmo[operador]! * (0.6 + aleatorio.proximo() * 0.8) * 3_600_000);
+
+    const itens = [];
+    for (let p = 1; p <= aleatorio.inteiro(6, 12); p++) {
+      const tipo = aleatorio.escolher(tipos);
+      const catalogo = CATALOGO[tipo];
+      const [marca, modelo] = aleatorio.escolher(catalogo.modelos);
+      const anoFabricacao = aleatorio.inteiro(2016, 2025);
+      const idade = Math.max(0, (dataEntrada.getTime() - Date.UTC(anoFabricacao, 6, 1)) / (365.25 * DIA));
+      const nivelEntrada = Math.min(6, Math.max(0, Math.round(catalogo.degradacaoAnual * idade + (aleatorio.proximo() - 0.5) * 1.6)));
+      // Parte dos equipamentos é reavaliada na triagem: mais pontos para a regressão
+      const reavaliado = nivelEntrada < 6 && aleatorio.proximo() < 0.4;
+      const nivelFinal = reavaliado ? Math.min(6, nivelEntrada + aleatorio.inteiro(1, 2)) : nivelEntrada;
+      const estadoEntrada = ORDEM_ESTADO_FISICO[nivelEntrada]!;
+      const estadoFinal = ORDEM_ESTADO_FISICO[nivelFinal]!;
+
+      let status: StatusRastreamento = 'AGUARDANDO_DESMONTE';
+      if (estadoFinal === 'INSERVIVEL' || estadoFinal === 'DANIFICADO_GRAVE') status = 'DESCARTE_SEGURO';
+      else {
+        const sorteio = aleatorio.proximo();
+        status = sorteio < 0.4 ? 'PECAS_REAPROVEITADAS' : sorteio < 0.8 ? 'MATERIAL_RECICLAVEL' : 'AGUARDANDO_DESMONTE';
+      }
+      const valorRecuperado = status === 'PECAS_REAPROVEITADAS' || status === 'MATERIAL_RECICLAVEL'
+        ? Math.round(catalogo.valorBase * FATOR_VALOR[estadoFinal] * (0.75 + aleatorio.proximo() * 0.5) * 100) / 100
+        : null;
+
+      const [{ valor }] = await prisma.$queryRaw<{ valor: bigint }[]>`SELECT nextval('equipamento_codigo_seq') AS valor` as [{ valor: bigint }];
+      itens.push({
+        codigoBarrasInterno: gerarCodigoBarras(tipo, Number(valor)),
+        tipo,
+        marca,
+        modelo,
+        anoFabricacao,
+        estadoFisico: estadoFinal,
+        pesoQuilogramas: Math.round((catalogo.peso[0] + aleatorio.proximo() * (catalogo.peso[1] - catalogo.peso[0])) * 1000) / 1000,
+        posicaoNoLote: p,
+        statusRastreamento: status,
+        valorRecuperado,
+        inservivelEm: estadoFinal === 'INSERVIVEL' ? (reavaliado ? conclusao : dataEntrada) : null,
+        criadoEm: dataEntrada,
+        historicoEstados: {
+          create: [
+            { dataHora: dataEntrada, estadoNovo: estadoEntrada, responsavel: 'importacao', justificativa: 'Estado na entrada' },
+            ...(reavaliado
+              ? [{ dataHora: conclusao, estadoAnterior: estadoEntrada, estadoNovo: estadoFinal, responsavel: operador, justificativa: 'Reavaliação técnica na triagem' }]
+              : []),
+          ],
+        },
+        movimentacoes: {
+          create: [
+            { dataHora: dataEntrada, origem: `ORGANIZACAO:${org.codigo}`, destino: 'AGUARDANDO_TRIAGEM', responsavel: 'importacao' },
+            { dataHora: conclusao, origem: 'EM_TRIAGEM', destino: status, responsavel: operador },
+          ],
+        },
+      });
+    }
+
+    await prisma.lote.create({
+      data: {
+        organizacaoId: org.id,
+        dataEntrada,
+        notaFiscal: `HIST-2026-${String(i + 1).padStart(4, '0')}`,
+        transportadora: aleatorio.escolher(['TransRapida', 'LogVerde', 'EcoCargo']),
+        observacoes: 'Histórico importado para a camada analítica',
+        statusProcessamento: aleatorio.proximo() < 0.5 ? 'ENCAMINHADO' : 'TRIAGEM_CONCLUIDA',
+        inicioTriagemEm: inicioTriagem,
+        conclusaoTriagemEm: conclusao,
+        responsavelTriagem: operador,
+        criadoEm: dataEntrada,
+        equipamentos: { create: itens },
+      },
+    });
+    equipamentos += itens.length;
+  }
+  console.log(`✔ histórico analítico: 40 lotes e ${equipamentos} equipamentos dos últimos 12 meses (operadores almox.ana, almox.bruno, almox.carla)`);
+
+  // Execução de vida útil "do passado" (só com dados até 180 dias atrás): base
+  // para a comparação previsão x realização (GET /internal/analises/vida-util/acuracia)
+  const corte = new Date(agora - 180 * DIA);
+  const historicos = await prisma.historicoEstadoFisico.findMany({
+    where: { dataHora: { lt: corte } },
+    select: { dataHora: true, estadoNovo: true, equipamento: { select: { tipo: true, anoFabricacao: true } } },
+  });
+  const modelos = ajustarModelosVidaUtil(
+    historicos.map((h) => ({
+      tipo: h.equipamento.tipo,
+      idadeAnos: idadeEmAnos(h.equipamento.anoFabricacao, h.dataHora),
+      nivel: nivelEstado(h.estadoNovo),
+    })),
+  );
+  await prisma.execucaoAnalise.create({
+    data: {
+      tipo: 'VIDA_UTIL',
+      origem: 'AGENDADA',
+      amostras: historicos.length,
+      resumo: { observacao: 'Execução histórica (dados até 180 dias atrás)' },
+      duracaoMs: 0,
+      geradaEm: corte,
+      previsoesVidaUtil: { create: modelos },
+    },
+  });
+  const atuais = await s.analise.executarTodas('AGENDADA');
+  console.log(`✔ análises: execução histórica de vida útil + ${atuais.length} execuções atuais (eficiência, rentabilidade, vida útil)`);
+
+  // Parceiro de demonstração da API pública
+  const parceiro = await s.chaveApi.criarParceiro(ator, { nome: 'Integração ERP Banco Horizonte', organizacao: 'BR001', plano: 'PROFISSIONAL' });
+  const chave = await s.chaveApi.emitir(ator, parceiro.id, {
+    escopos: ['RASTREABILIDADE_LEITURA', 'LOTES_LEITURA', 'LOTES_ESCRITA', 'ANALISES_LEITURA', 'RELATORIOS_SOLICITAR'],
+    descricao: 'Chave de demonstração (seed)',
+  });
+  console.log(`✔ parceiro "${parceiro.nome}" (BR001, plano PROFISSIONAL)`);
+  console.log(`  chave de API de DESENVOLVIMENTO (use em X-API-Key ou no botão Authorize do /docs):\n  ${chave.chave}`);
 }
 
 main()

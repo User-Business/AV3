@@ -1,7 +1,7 @@
 import type { Db } from '../database.js';
-import type { JournalTransacao, Movimentacao, Prisma } from '../generated/prisma/client.js';
+import type { EstadoFisico, HistoricoEstadoFisico, JournalTransacao, Movimentacao, Prisma } from '../generated/prisma/client.js';
 
-/** Movimentações (append-only) e journal de auditoria. */
+/** Movimentações e histórico de estado físico (append-only) e journal de auditoria. */
 export class HistoricoRepository {
   constructor(private readonly db: Db) {}
 
@@ -13,6 +13,17 @@ export class HistoricoRepository {
     observacao?: string | null;
   }): Promise<Movimentacao> {
     return this.db.movimentacao.create({ data: dados });
+  }
+
+  /** Ponto da série temporal usada na análise de vida útil. */
+  registrarEstadoFisico(dados: {
+    equipamentoId: string;
+    estadoAnterior: EstadoFisico | null;
+    estadoNovo: EstadoFisico;
+    responsavel: string;
+    justificativa?: string | null;
+  }): Promise<HistoricoEstadoFisico> {
+    return this.db.historicoEstadoFisico.create({ data: dados });
   }
 
   registrarJournal(dados: {

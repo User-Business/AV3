@@ -9,7 +9,9 @@ const STATUS_POR_CODIGO: Record<string, number> = {
   SEM_PERMISSAO: 403,
   NAO_ENCONTRADO: 404,
   CONFLITO: 409,
+  EXPIRADO: 410,
   REGRA_NEGOCIO: 422,
+  LIMITE_EXCEDIDO: 429,
 };
 
 /** SQLSTATE próprios lançados pelos triggers da migração (classe GC). */

@@ -46,6 +46,16 @@ export class ErroSemPermissao extends ErroDominio {
   readonly codigo = 'SEM_PERMISSAO';
 }
 
+/** Recurso que existiu, mas não está mais disponível (ex.: relatório expirado). */
+export class ErroExpirado extends ErroDominio {
+  readonly codigo = 'EXPIRADO';
+}
+
+/** Cota de requisições do plano do parceiro esgotada. */
+export class ErroLimiteExcedido extends ErroDominio {
+  readonly codigo = 'LIMITE_EXCEDIDO';
+}
+
 export function conflitoDeVersao(entidade: string, id: string): ErroConflito {
   return new ErroConflito(
     `${entidade} '${id}' foi alterado(a) por outra requisição. Recarregue os dados e tente novamente.`,

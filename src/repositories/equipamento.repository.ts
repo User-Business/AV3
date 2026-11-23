@@ -19,6 +19,7 @@ const INCLUIR_RASTREIO = {
     },
   },
   movimentacoes: { orderBy: { dataHora: 'asc' } },
+  historicoEstados: { orderBy: { dataHora: 'asc' } },
 } as const satisfies Prisma.EquipamentoInclude;
 
 export type EquipamentoRastreado = Prisma.EquipamentoGetPayload<{ include: typeof INCLUIR_RASTREIO }>;
@@ -50,12 +51,36 @@ export class EquipamentoRepository {
     return equipamento;
   }
 
-  /** Eager loading do histórico completo (lote, organização e movimentações). */
-  rastrear(idOuCodigo: string): Promise<EquipamentoRastreado | null> {
+  /**
+   * Eager loading do histórico completo (lote, organização, movimentações e
+   * estados). Com `organizacaoId`, só encontra equipamentos daquela organização
+   * (uso da API pública).
+   */
+  rastrear(idOuCodigo: string, organizacaoId?: string): Promise<EquipamentoRastreado | null> {
     const ehUuid = /^[0-9a-f-]{36}$/i.test(idOuCodigo);
-    return this.db.equipamento.findUnique({
-      where: ehUuid ? { id: idOuCodigo } : { codigoBarrasInterno: idOuCodigo.toUpperCase() },
+    return this.db.equipamento.findFirst({
+      where: {
+        ...(ehUuid ? { id: idOuCodigo } : { codigoBarrasInterno: idOuCodigo.toUpperCase() }),
+        ...(organizacaoId ? { lote: { organizacaoId } } : {}),
+      },
       include: INCLUIR_RASTREIO,
+    });
+  }
+
+  /**
+   * Página de equipamentos para os relatórios assíncronos. Paginação por cursor
+   * (id): o consumo de memória fica constante mesmo com milhares de registros.
+   */
+  paginaParaRelatorio(filtro: Prisma.EquipamentoWhereInput, depoisDe: string | undefined, tamanho: number) {
+    return this.db.equipamento.findMany({
+      where: filtro,
+      orderBy: { id: 'asc' },
+      take: tamanho,
+      ...(depoisDe ? { cursor: { id: depoisDe }, skip: 1 } : {}),
+      include: {
+        lote: { select: { notaFiscal: true, dataEntrada: true } },
+        movimentacoes: { orderBy: { dataHora: 'desc' }, take: 1, select: { destino: true, dataHora: true } },
+      },
     });
   }
 

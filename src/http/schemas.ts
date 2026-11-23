@@ -123,6 +123,7 @@ export const SEquipamento = Type.Object({
   posicaoNoLote: Type.Integer(),
   statusRastreamento: SStatusRastreamento,
   depreciacao: Type.Number({ description: 'Fração já depreciada (0 a 1)' }),
+  valorRecuperado: Nulavel(Type.String({ description: 'Valor obtido na recuperação (decimal em string)' })),
   versao: Type.Integer(),
 });
 
@@ -137,6 +138,9 @@ export const SLote = Type.Object({
   transportadora: Type.String(),
   statusProcessamento: SStatusLote,
   observacoes: Nulavel(Type.String()),
+  inicioTriagemEm: Nulavel(SDataHora),
+  conclusaoTriagemEm: Nulavel(SDataHora),
+  responsavelTriagem: Nulavel(Type.String()),
   pesoTotalQuilogramas: Type.Number(),
   quantidadeEquipamentos: Type.Integer(),
   versao: Type.Integer(),
@@ -173,6 +177,15 @@ export const SRastreio = Type.Object({
   }),
   organizacao: Type.Object({ id: SUuid, codigo: Type.String(), razaoSocial: Type.String() }),
   movimentacoes: Type.Array(SMovimentacao),
+  historicoEstadoFisico: Type.Array(
+    Type.Object({
+      dataHora: SDataHora,
+      estadoAnterior: Nulavel(SEstadoFisico),
+      estadoNovo: SEstadoFisico,
+      justificativa: Nulavel(Type.String()),
+      responsavel: Type.String(),
+    }),
+  ),
 });
 
 const SLivre = Type.Object({}, { additionalProperties: true });
@@ -422,6 +435,9 @@ export const rotasEquipamento = {
       status: SStatusRastreamento,
       versao: SVersao,
       justificativa: Type.Optional(Type.String({ maxLength: 2000 })),
+      valorRecuperado: Type.Optional(
+        Type.Number({ minimum: 0, maximum: 9_999_999_999, description: 'Valor obtido (R$); só em PECAS_REAPROVEITADAS ou MATERIAL_RECICLAVEL' }),
+      ),
     }),
     response: { 200: SEquipamento, ...respostasErro },
   },

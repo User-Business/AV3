@@ -32,7 +32,7 @@ describe('Jornada completa da API', { skip: !URL_TESTE && 'defina DATABASE_URL_T
   const chamar = async (metodo: string, url: string, papel?: string, corpo?: unknown) => {
     const resposta = await app.inject({
       method: metodo as 'GET',
-      url: `/api/v1${url}`,
+      url: `/api/v1/internal${url}`,
       headers: papel ? { authorization: `Bearer ${tokens[papel]}` } : {},
       ...(corpo !== undefined ? { payload: corpo as object } : {}),
     });
@@ -55,7 +55,7 @@ describe('Jornada completa da API', { skip: !URL_TESTE && 'defina DATABASE_URL_T
       DATABASE_URL: URL_TESTE,
       JWT_SECRET: 'segredo-de-teste-com-mais-de-32-caracteres!',
     });
-    app = await construirApp({ config, prisma, logger: false });
+    ({ app } = await construirApp({ config, prisma, logger: false }));
 
     const usuarios = [
       ['admin', 'ADMINISTRADOR'],
@@ -254,6 +254,6 @@ describe('Jornada completa da API', { skip: !URL_TESTE && 'defina DATABASE_URL_T
   it('documentação OpenAPI disponível', async () => {
     const r = await app.inject({ method: 'GET', url: '/docs/json' });
     assert.equal(r.statusCode, 200);
-    assert.ok(r.json().paths['/api/v1/lotes']);
+    assert.ok(r.json().paths['/api/v1/internal/lotes']);
   });
 });
